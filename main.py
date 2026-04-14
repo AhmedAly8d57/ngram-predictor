@@ -3,67 +3,83 @@ import argparse
 import logging
 from dotenv import load_dotenv
 
-# Import custom modules
 from src.data_prep.normalizer import Normalizer
+from src.model.ngram_model import NGramModel
+from src.inference.predictor import Predictor
 
 def main():
-    # 1. Setup and Config
     load_dotenv(dotenv_path="config/.env")
     
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
+    # Setup Logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger = logging.getLogger(__name__)
 
-    # 2. Parse Command Line Arguments
-    parser = argparse.ArgumentParser(description="N-Gram Next-Word Predictor")
+    # Argument Parsing
+    parser = argparse.ArgumentParser(description="Sherlock N-Gram Predictor")
     parser.add_argument("--step", type=str, required=True, 
                         choices=["dataprep", "model", "inference", "all"])
     args = parser.parse_args()
 
-    # 3. Initialize Normalizer
+    # Initialize Shared Instances
     norm = Normalizer()
+    model = NGramModel()
 
-    # --- STEP: DATA PREPARATION ---
-    if args.step == "dataprep" or args.step == "all":
-        logger.info("Starting Data Preparation...")
+    # --- 1. DATA PREPARATION ---
+    if args.step in ["dataprep", "all"]:
+        logger.info("Step 1: Starting Data Preparation...")
         raw_dir = os.getenv("TRAIN_RAW_DIR")
         output_file = os.getenv("TRAIN_TOKENS")
-
-        if not raw_dir or not output_file:
-            logger.error("Config variables missing. Check config/.env")
-            return
-
-        # Load returns a dictionary: { "Book1.txt": "full text...", ... }
-        raw_books_dict = norm.load(raw_dir)
-        all_tokenized_sentences = []
-
-        # Iterate through each book individually
-        for filename, raw_text in raw_books_dict.items():
-            logger.info(f"Processing {filename}...")
-            
-            # Clean THIS book specifically
-            clean_book_text = norm.strip_gutenberg(raw_text)
-            
-            # Split THIS book into sentences
-            sentences = norm.sentence_tokenize(clean_book_text)
-            
+        
+        raw_books = norm.load(raw_dir)
+        all_sentences = []
+        for filename, text in raw_books.items():
+            clean_text = norm.strip_gutenberg(text)
+            sentences = norm.sentence_tokenize(clean_text)
             for s in sentences:
-                # Normalize (lowercase, remove punc/nums/dashes)
-                cleaned_s = norm.normalize(s)
-                tokens = norm.word_tokenize(cleaned_s)
+                normalized = norm.normalize(s)
+                tokens = norm.word_tokenize(normalized)
+                if tokens: all_sentences.append(tokens)
+        
+        norm.save(all_sentences, output_file)
+        logger.info(f"Data Prep complete. Tokens saved to {output_file}")
+
+    # --- 2. MODEL TRAINING ---
+    if args.step in ["model", "all"]:
+        logger.info("Step 2: Starting Model Training...")
+        token_file = os.getenv("TRAIN_TOKENS")
+        
+        # Ensure directory exists for saving
+        os.makedirs(os.path.dirname(os.getenv("MODEL")), exist_ok=True)
+        
+        # Build and Save
+        model.build_vocab(token_file, threshold=int(os.getenv("UNK_THRESHOLD", 3)))
+        model.build_counts_and_probabilities(token_file)
+        model.save_model(os.getenv("MODEL"))
+        model.save_vocab(os.getenv("VOCAB"))
+        logger.info("Model Training complete and files saved.")
+
+    # --- 3. INFERENCE ---
+    if args.step in ["inference", "all"]:
+        logger.info("Step 3: Entering Inference Mode...")
+        
+        # Load the newly created files
+        model.load(os.getenv("MODEL"), os.getenv("VOCAB"))
+        predictor = Predictor(model, norm)
+        
+        print("\n" + "="*40)
+        print("   SHERLOCK HOLMES NEXT-WORD PREDICTOR")
+        print("="*40)
+        print("Enter a phrase to see predictions (or 'q' to quit).")
+
+        while True:
+            text = input("\nContext: ").strip()
+            if text.lower() in ['q', 'quit', 'exit']:
+                break
+            if not text:
+                continue
                 
-                if tokens:
-                    all_tokenized_sentences.append(tokens)
-
-        # Save: This method handles the "\n" for one sentence per line
-        norm.save(all_tokenized_sentences, output_file)
-        logger.info(f"Success! Saved {len(all_tokenized_sentences)} sentences to {output_file}")
-
-    # --- STEP: MODEL TRAINING ---
-    if args.step == "model" or args.step == "all":
-        logger.info("Model Training step is next!")
+            suggestions = predictor.predict_next(text, k=int(os.getenv("TOP_K", 3)))
+            print(f"Top {os.getenv('TOP_K')} Predictions: {suggestions}")
 
 if __name__ == "__main__":
     main()
