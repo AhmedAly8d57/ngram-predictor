@@ -1,7 +1,7 @@
 import re
 import os
 import nltk
-
+nltk.download('punkt')
 class Normalizer:
     """
     Responsibility: Loading, cleaning, tokenizing, and saving the corpus.
